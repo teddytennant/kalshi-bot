@@ -18,8 +18,10 @@
           buildInputs = [
             (python.withPackages (ps: with ps; [
               requests
+              textual
               pytest
               pytest-cov
+              pytest-asyncio
             ]))
           ];
 
