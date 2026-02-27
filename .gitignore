@@ -12,6 +12,7 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 result
+.dev-bin/
 state.json
 .env
 *.swp

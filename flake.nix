@@ -29,6 +29,15 @@
             echo "kalshi-bot dev shell ready"
             echo "Python: $(python --version)"
             export PYTHONPATH="$PWD/src:$PYTHONPATH"
+
+            mkdir -p .dev-bin
+            cat > .dev-bin/kalshi-bot <<SCRIPT
+            #!/usr/bin/env python
+            from kalshi_bot.runner import main
+            main()
+            SCRIPT
+            chmod +x .dev-bin/kalshi-bot
+            export PATH="$PWD/.dev-bin:$PATH"
           '';
         };
       }
