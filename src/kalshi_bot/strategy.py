@@ -86,5 +86,5 @@ class MeanReversionStrategy(Strategy):
         return [
             m
             for m in markets
-            if m.status == "open" and m.volume >= self.min_volume
+            if m.status in ("open", "active") and m.volume >= self.min_volume
         ]

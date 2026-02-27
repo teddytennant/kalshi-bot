@@ -188,6 +188,18 @@ class TestMeanReversionStrategy:
         assert len(selected) == 1
         assert selected[0].ticker == "A"
 
+    def test_select_markets_accepts_active_status(self):
+        strategy = MeanReversionStrategy(window=3, threshold=Decimal("0.05"), order_quantity=10)
+        active_market = Market(
+            ticker="A", title="A", status="active", result="",
+            yes_bid=Decimal("0.50"), yes_ask=Decimal("0.52"),
+            no_bid=Decimal("0.48"), no_ask=Decimal("0.50"),
+            volume=100, open_interest=10,
+            event_ticker="E", series_ticker="S", subtitle="", close_time="",
+        )
+        selected = strategy.select_markets([active_market])
+        assert len(selected) == 1
+
     def test_select_markets_filters_low_volume(self):
         strategy = MeanReversionStrategy(
             window=3,

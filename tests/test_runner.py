@@ -1,6 +1,7 @@
 """Tests for CLI entry point."""
 
 import sys
+import time
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
@@ -8,7 +9,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from kalshi_bot.events import EventBus, EventType
+from kalshi_bot.events import Event, EventBus, EventType
 from kalshi_bot.models import (
     Fill,
     Market,
@@ -18,7 +19,15 @@ from kalshi_bot.models import (
     Side,
 )
 from kalshi_bot.portfolio import Portfolio
-from kalshi_bot.runner import build_parser, cmd_markets, cmd_status, run_cycle
+from kalshi_bot.runner import (
+    build_parser,
+    cmd_markets,
+    cmd_run,
+    cmd_status,
+    format_event,
+    print_portfolio_summary,
+    run_cycle,
+)
 
 
 @pytest.fixture
@@ -91,6 +100,18 @@ class TestBuildParser:
         assert args.interval == 60
         assert args.balance == 10000
         assert args.state_file == "state.json"
+        assert args.cycles == 0
+        assert args.verbose is False
+
+    def test_run_cycles_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["run", "--cycles", "3"])
+        assert args.cycles == 3
+
+    def test_run_verbose_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["run", "-v"])
+        assert args.verbose is True
 
     def test_dashboard_subcommand(self):
         parser = build_parser()
@@ -136,11 +157,110 @@ class TestCmdStatus:
         captured = capsys.readouterr()
         assert "9993.50" in captured.out
         assert "T" in captured.out
+        assert "Return:" in captured.out
 
     def test_no_state_file(self, tmp_path, capsys):
         cmd_status(str(tmp_path / "nonexistent.json"))
         captured = capsys.readouterr()
         assert "No state file" in captured.out
+
+
+class TestFormatEvent:
+    def test_cycle_start(self):
+        e = Event(EventType.CYCLE_START, time.time(), {"cycle": 3})
+        line = format_event(e)
+        assert "Cycle 3 started" in line
+
+    def test_cycle_end(self):
+        e = Event(EventType.CYCLE_END, time.time(), {
+            "cycle": 3, "markets": 15, "signals": 2, "fills": 1,
+        })
+        line = format_event(e)
+        assert "Cycle 3 complete" in line
+        assert "15 markets" in line
+        assert "2 signals" in line
+        assert "1 fills" in line
+
+    def test_cycle_error(self):
+        e = Event(EventType.CYCLE_ERROR, time.time(), {"error": "connection timeout"})
+        line = format_event(e)
+        assert "ERROR" in line
+        assert "connection timeout" in line
+
+    def test_markets_fetched(self):
+        e = Event(EventType.MARKETS_FETCHED, time.time(), {"total": 100, "selected": 42})
+        line = format_event(e)
+        assert "100 markets" in line
+        assert "42 selected" in line
+
+    def test_signal_generated(self):
+        e = Event(EventType.SIGNAL_GENERATED, time.time(), {
+            "ticker": "KXBTC-26FEB", "side": "yes", "price": "0.65", "quantity": 10,
+        })
+        line = format_event(e)
+        assert "SIGNAL YES" in line
+        assert "KXBTC-26FEB" in line
+        assert "0.65" in line
+
+    def test_order_filled(self):
+        e = Event(EventType.ORDER_FILLED, time.time(), {
+            "ticker": "KXBTC-26FEB", "side": "yes", "quantity": 10, "total_cost": "6.50",
+        })
+        line = format_event(e)
+        assert "FILLED YES" in line
+        assert "10 contracts" in line
+        assert "$6.50" in line
+
+    def test_order_rejected(self):
+        e = Event(EventType.ORDER_REJECTED, time.time(), {
+            "ticker": "KXBTC-26FEB", "reason": "Insufficient balance",
+        })
+        line = format_event(e)
+        assert "REJECTED" in line
+        assert "Insufficient balance" in line
+
+    def test_market_scanned_hidden_by_default(self):
+        e = Event(EventType.MARKET_SCANNED, time.time(), {
+            "ticker": "KXBTC-26FEB", "yes_bid": "0.65", "yes_ask": "0.67", "signal": None,
+        })
+        assert format_event(e, verbose=False) is None
+
+    def test_market_scanned_shown_with_verbose(self):
+        e = Event(EventType.MARKET_SCANNED, time.time(), {
+            "ticker": "KXBTC-26FEB", "yes_bid": "0.65", "yes_ask": "0.67", "signal": None,
+        })
+        line = format_event(e, verbose=True)
+        assert "KXBTC-26FEB" in line
+        assert "0.65" in line
+        assert "0.67" in line
+
+    def test_market_scanned_with_signal(self):
+        e = Event(EventType.MARKET_SCANNED, time.time(), {
+            "ticker": "KXBTC-26FEB", "yes_bid": "0.65", "yes_ask": "0.67", "signal": "YES",
+        })
+        line = format_event(e, verbose=True)
+        assert "YES" in line
+
+
+class TestPrintPortfolioSummary:
+    def test_positive_pnl(self, capsys):
+        p = Portfolio(initial_balance=Decimal("10000.00"))
+        p.balance = Decimal("10250.00")
+        p.realized_pnl = Decimal("250.00")
+        print_portfolio_summary(p)
+        out = capsys.readouterr().out
+        assert "$10250.00" in out
+        assert "+$250.00" in out
+        assert "+2.50%" in out
+
+    def test_negative_pnl(self, capsys):
+        p = Portfolio(initial_balance=Decimal("10000.00"))
+        p.balance = Decimal("9800.00")
+        p.realized_pnl = Decimal("-200.00")
+        print_portfolio_summary(p)
+        out = capsys.readouterr().out
+        assert "$9800.00" in out
+        assert "$-200.00" in out
 
 
 class TestRunCycle:
@@ -345,3 +465,75 @@ class TestRunCycleWithEventBus:
 
         captured = capsys.readouterr()
         assert "Filled YES T" in captured.out
+
+
+class TestCmdRun:
+    @pytest.fixture
+    def setup(self, mock_client, tmp_path):
+        market = Market(
+            ticker="T", title="T", status="open", result="",
+            yes_bid=Decimal("0.65"), yes_ask=Decimal("0.67"),
+            no_bid=Decimal("0.33"), no_ask=Decimal("0.35"),
+            volume=1000, open_interest=100,
+            event_ticker="E", series_ticker="S", subtitle="", close_time="",
+        )
+        strategy = MagicMock()
+        strategy.select_markets.return_value = [market]
+        strategy.evaluate.return_value = None
+        mock_client.get_markets.return_value = ([market], "")
+        mock_client.get_orderbook.return_value = Orderbook(
+            ticker="T",
+            yes=tuple([OrderbookLevel(Decimal("0.65"), 100)]),
+            no=tuple([OrderbookLevel(Decimal("0.33"), 120)]),
+        )
+        mock_client.get_trades.return_value = ([], "")
+        state_path = tmp_path / "state.json"
+        portfolio = Portfolio(initial_balance=Decimal("10000"))
+        return mock_client, strategy, state_path, portfolio
+
+    def test_runs_fixed_cycles(self, setup, capsys):
+        client, strategy, state_path, portfolio = setup
+        cmd_run(client, state_path, portfolio, strategy, interval=0, max_cycles=2)
+        out = capsys.readouterr().out
+        assert "Cycle 1 started" in out
+        assert "Cycle 2 started" in out
+        assert "Cycle 1 complete" in out
+        assert "Cycle 2 complete" in out
+        assert "State saved" in out
+
+    def test_saves_state_each_cycle(self, setup):
+        from kalshi_bot.persistence import load_state
+
+        client, strategy, state_path, portfolio = setup
+        cmd_run(client, state_path, portfolio, strategy, interval=0, max_cycles=1)
+        assert state_path.exists()
+        loaded = load_state(state_path)
+        assert loaded is not None
+        assert loaded.balance == portfolio.balance
+
+    def test_prints_portfolio_summary(self, setup, capsys):
+        client, strategy, state_path, portfolio = setup
+        cmd_run(client, state_path, portfolio, strategy, interval=0, max_cycles=1)
+        out = capsys.readouterr().out
+        assert "Balance: $10000.00" in out
+        assert "Positions:" in out
+
+    def test_verbose_shows_scans(self, setup, capsys):
+        client, strategy, state_path, portfolio = setup
+        cmd_run(client, state_path, portfolio, strategy, interval=0, max_cycles=1, verbose=True)
+        out = capsys.readouterr().out
+        assert "scan T" in out
+
+    def test_non_verbose_hides_scans(self, setup, capsys):
+        client, strategy, state_path, portfolio = setup
+        cmd_run(client, state_path, portfolio, strategy, interval=0, max_cycles=1, verbose=False)
+        out = capsys.readouterr().out
+        assert "scan T" not in out
+
+    def test_handles_cycle_error(self, setup, capsys):
+        client, strategy, state_path, portfolio = setup
+        client.get_markets.side_effect = Exception("API down")
+        cmd_run(client, state_path, portfolio, strategy, interval=0, max_cycles=1)
+        out = capsys.readouterr().out
+        assert "ERROR" in out
+        assert "API down" in out

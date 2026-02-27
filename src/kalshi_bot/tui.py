@@ -165,6 +165,7 @@ class DashboardApp(App):
                     strategy,
                     event_bus=self._event_bus,
                     cycle_number=self._cycle_number,
+                    series=self._series,
                 )
                 save_state(self._portfolio, state_path)
             except Exception as e:
