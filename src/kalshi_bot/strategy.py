@@ -61,22 +61,25 @@ class MeanReversionStrategy(Strategy):
 
         recent = trades[: self.window]
         mean_price = sum(t.yes_price for t in recent) / len(recent)
-        current_price = market.yes_bid
 
-        if current_price < mean_price - self.threshold:
+        # Use ask prices for buy signals (what we'd actually pay)
+        yes_ask = market.yes_ask
+        no_ask = market.no_ask
+
+        if yes_ask > Decimal("0") and yes_ask < mean_price - self.threshold:
             return TradeSignal(
                 ticker=market.ticker,
                 side=Side.YES,
                 order_type=OrderType.LIMIT,
-                price=current_price,
+                price=yes_ask,
                 quantity=self.order_quantity,
             )
-        elif current_price > mean_price + self.threshold:
+        elif no_ask > Decimal("0") and market.yes_bid > mean_price + self.threshold:
             return TradeSignal(
                 ticker=market.ticker,
                 side=Side.NO,
                 order_type=OrderType.LIMIT,
-                price=Decimal("1.00") - current_price,
+                price=no_ask,
                 quantity=self.order_quantity,
             )
 
