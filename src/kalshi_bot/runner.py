@@ -36,6 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--quantity", type=int, default=10, help="Contracts per trade (default: 10)")
     run_parser.add_argument("--window", type=int, default=10, help="Trade history window (default: 10)")
     run_parser.add_argument("--min-volume", type=int, default=0, help="Min market volume filter")
+    run_parser.add_argument("--take-profit", type=float, default=0, help="Sell when per-contract gain >= threshold (0=disabled)")
+    run_parser.add_argument("--stop-loss", type=float, default=0, help="Sell when per-contract loss >= threshold (0=disabled)")
 
     status_parser = subparsers.add_parser("status", help="Show portfolio status")
     status_parser.add_argument("--state-file", type=str, default="state.json", help="State file path")
@@ -49,6 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     dash_parser.add_argument("--balance", type=int, default=10000, help="Initial balance in cents")
     dash_parser.add_argument("--series", type=str, default="", help="Filter by series ticker")
     dash_parser.add_argument("--state-file", type=str, default="state.json", help="State file path")
+    dash_parser.add_argument("--take-profit", type=float, default=0, help="Sell when per-contract gain >= threshold (0=disabled)")
+    dash_parser.add_argument("--stop-loss", type=float, default=0, help="Sell when per-contract loss >= threshold (0=disabled)")
 
     return parser
 
@@ -104,11 +108,14 @@ def format_event(event: Event, verbose: bool = False) -> Optional[str]:
         return f"[{ts}] --- Cycle {d.get('cycle', '?')} started ---"
 
     if et == EventType.CYCLE_END:
+        exits = d.get("exits", 0)
+        exits_str = f", {exits} exits" if exits else ""
         return (
             f"[{ts}] Cycle {d.get('cycle', '?')} complete: "
             f"{d.get('markets', 0)} markets scanned, "
             f"{d.get('signals', 0)} signals, "
             f"{d.get('fills', 0)} fills"
+            f"{exits_str}"
         )
 
     if et == EventType.CYCLE_ERROR:
@@ -138,6 +145,21 @@ def format_event(event: Event, verbose: bool = False) -> Optional[str]:
         return (
             f"[{ts}] REJECTED {d.get('ticker', '?')}: "
             f"{d.get('reason', '?')}"
+        )
+
+    if et == EventType.EXIT_SIGNAL:
+        side = d.get("side", "?").upper()
+        return (
+            f"[{ts}] EXIT {side} {d.get('ticker', '?')} "
+            f"reason={d.get('reason', '?')} "
+            f"pnl_per_contract={d.get('pnl_per_contract', '?')}"
+        )
+
+    if et == EventType.POSITION_CLOSED:
+        side = d.get("side", "?").upper()
+        return (
+            f"[{ts}] CLOSED {side} {d.get('ticker', '?')}: "
+            f"{d.get('quantity', '?')} contracts @ {d.get('price', '?')}"
         )
 
     if et == EventType.MARKET_SCANNED and verbose:
@@ -179,6 +201,8 @@ def run_cycle(
     event_bus: Optional[EventBus] = None,
     cycle_number: int = 0,
     series: str = "",
+    take_profit: Decimal = Decimal("0"),
+    stop_loss: Decimal = Decimal("0"),
 ) -> None:
     if event_bus:
         event_bus.emit(EventType.CYCLE_START, cycle=cycle_number)
@@ -262,6 +286,61 @@ def run_cycle(
                 else:
                     print(f"  Order rejected: {e}")
 
+    # Exit monitoring: check positions for take-profit / stop-loss
+    exits_count = 0
+    if take_profit > 0 or stop_loss > 0:
+        positions_snapshot = list(portfolio.positions.items())
+        for (ticker, side), pos in positions_snapshot:
+            orderbook = client.get_orderbook(ticker)
+            if side == Side.YES:
+                current_bid = orderbook.best_yes_bid
+            else:
+                current_bid = orderbook.best_no_bid
+
+            if current_bid is None:
+                continue
+
+            per_contract_pnl = current_bid - pos.avg_price
+
+            reason = None
+            if take_profit > 0 and per_contract_pnl >= take_profit:
+                reason = "take_profit"
+            elif stop_loss > 0 and per_contract_pnl <= -stop_loss:
+                reason = "stop_loss"
+
+            if reason is None:
+                continue
+
+            if event_bus:
+                event_bus.emit(
+                    EventType.EXIT_SIGNAL,
+                    ticker=ticker,
+                    side=side.value,
+                    reason=reason,
+                    pnl_per_contract=str(per_contract_pnl),
+                )
+
+            try:
+                sell_fills = engine.sell_position(ticker, side, pos.quantity)
+                if sell_fills:
+                    exits_count += 1
+                    total = sum(f.total_cost for f in sell_fills)
+                    qty = sum(f.quantity for f in sell_fills)
+                    if event_bus:
+                        event_bus.emit(
+                            EventType.POSITION_CLOSED,
+                            ticker=ticker,
+                            side=side.value,
+                            quantity=qty,
+                            price=str(total / qty) if qty else "0",
+                            reason=reason,
+                        )
+                    else:
+                        print(f"  Closed {side.value.upper()} {ticker}: "
+                              f"{qty} contracts ({reason})")
+            except ValueError:
+                pass
+
     # Check for settlements on held positions
     held_tickers = list({ticker for ticker, _ in portfolio.positions})
     if held_tickers:
@@ -274,6 +353,7 @@ def run_cycle(
             markets=len(selected),
             signals=signals_count,
             fills=fills_count,
+            exits=exits_count,
         )
 
 
@@ -286,6 +366,8 @@ def cmd_run(
     max_cycles: int = 0,
     verbose: bool = False,
     series: str = "",
+    take_profit: Decimal = Decimal("0"),
+    stop_loss: Decimal = Decimal("0"),
 ) -> None:
     """Run the trading loop with structured event output."""
     event_bus = EventBus()
@@ -306,6 +388,8 @@ def cmd_run(
                     client, portfolio, strategy,
                     event_bus=event_bus, cycle_number=cycle,
                     series=series,
+                    take_profit=take_profit,
+                    stop_loss=stop_loss,
                 )
                 save_state(portfolio, state_path)
             except Exception as e:
@@ -371,6 +455,8 @@ def main() -> None:
             max_cycles=args.cycles,
             verbose=args.verbose,
             series=args.series,
+            take_profit=Decimal(str(args.take_profit)),
+            stop_loss=Decimal(str(args.stop_loss)),
         )
     elif args.command == "dashboard":
         from kalshi_bot.tui import DashboardApp
@@ -380,6 +466,8 @@ def main() -> None:
             balance=args.balance,
             series=args.series,
             state_file=args.state_file,
+            take_profit=Decimal(str(args.take_profit)),
+            stop_loss=Decimal(str(args.stop_loss)),
         )
         app.run()
 

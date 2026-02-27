@@ -19,6 +19,8 @@ class TestEventType:
         assert EventType.ORDER_REJECTED.value == "order_rejected"
         assert EventType.MARKET_SETTLED.value == "market_settled"
         assert EventType.MARKET_SCANNED.value == "market_scanned"
+        assert EventType.EXIT_SIGNAL.value == "exit_signal"
+        assert EventType.POSITION_CLOSED.value == "position_closed"
 
 
 class TestEvent:

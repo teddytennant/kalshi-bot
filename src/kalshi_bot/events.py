@@ -19,6 +19,8 @@ class EventType(Enum):
     ORDER_REJECTED = "order_rejected"
     MARKET_SETTLED = "market_settled"
     MARKET_SCANNED = "market_scanned"
+    EXIT_SIGNAL = "exit_signal"
+    POSITION_CLOSED = "position_closed"
 
 
 @dataclass(frozen=True)

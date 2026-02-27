@@ -537,3 +537,257 @@ class TestCmdRun:
         out = capsys.readouterr().out
         assert "ERROR" in out
         assert "API down" in out
+
+
+class TestRunCycleExitMonitoring:
+    @pytest.fixture
+    def setup(self, mock_client):
+        market = Market(
+            ticker="T", title="T", status="open", result="",
+            yes_bid=Decimal("0.65"), yes_ask=Decimal("0.67"),
+            no_bid=Decimal("0.33"), no_ask=Decimal("0.35"),
+            volume=1000, open_interest=100,
+            event_ticker="E", series_ticker="S", subtitle="", close_time="",
+        )
+        strategy = MagicMock()
+        strategy.select_markets.return_value = [market]
+        strategy.evaluate.return_value = None
+        mock_client.get_markets.return_value = ([market], "")
+        mock_client.get_trades.return_value = ([], "")
+        return mock_client, strategy, market
+
+    def test_take_profit_triggers_exit(self, setup):
+        client, strategy, _ = setup
+        portfolio = Portfolio(initial_balance=Decimal("10000"))
+        # Create a position bought at 0.50
+        portfolio.record_fill(
+            Fill(ticker="POS", side=Side.YES, price=Decimal("0.50"), quantity=10)
+        )
+        # Orderbook for buy-signal scanning
+        client.get_orderbook.return_value = Orderbook(
+            ticker="T",
+            yes=tuple([OrderbookLevel(Decimal("0.65"), 100)]),
+            no=tuple([OrderbookLevel(Decimal("0.33"), 120)]),
+        )
+
+        bus = EventBus()
+        # Mock get_orderbook to return different results per ticker
+        def mock_orderbook(ticker):
+            if ticker == "POS":
+                return Orderbook(
+                    ticker="POS",
+                    yes=tuple([OrderbookLevel(Decimal("0.55"), 50)]),
+                    no=tuple(),
+                )
+            return Orderbook(
+                ticker="T",
+                yes=tuple([OrderbookLevel(Decimal("0.65"), 100)]),
+                no=tuple([OrderbookLevel(Decimal("0.33"), 120)]),
+            )
+        client.get_orderbook.side_effect = mock_orderbook
+
+        run_cycle(
+            client, portfolio, strategy, event_bus=bus, cycle_number=1,
+            take_profit=Decimal("0.04"),
+        )
+
+        events, _ = bus.drain_from(0)
+        types = [e.event_type for e in events]
+        assert EventType.EXIT_SIGNAL in types
+        assert EventType.POSITION_CLOSED in types
+        exit_ev = [e for e in events if e.event_type == EventType.EXIT_SIGNAL][0]
+        assert exit_ev.data["reason"] == "take_profit"
+        assert exit_ev.data["ticker"] == "POS"
+
+    def test_stop_loss_triggers_exit(self, setup):
+        client, strategy, _ = setup
+        portfolio = Portfolio(initial_balance=Decimal("10000"))
+        portfolio.record_fill(
+            Fill(ticker="POS", side=Side.YES, price=Decimal("0.60"), quantity=10)
+        )
+
+        bus = EventBus()
+        def mock_orderbook(ticker):
+            if ticker == "POS":
+                return Orderbook(
+                    ticker="POS",
+                    yes=tuple([OrderbookLevel(Decimal("0.50"), 50)]),
+                    no=tuple(),
+                )
+            return Orderbook(
+                ticker="T",
+                yes=tuple([OrderbookLevel(Decimal("0.65"), 100)]),
+                no=tuple([OrderbookLevel(Decimal("0.33"), 120)]),
+            )
+        client.get_orderbook.side_effect = mock_orderbook
+
+        run_cycle(
+            client, portfolio, strategy, event_bus=bus, cycle_number=1,
+            stop_loss=Decimal("0.05"),
+        )
+
+        events, _ = bus.drain_from(0)
+        types = [e.event_type for e in events]
+        assert EventType.EXIT_SIGNAL in types
+        exit_ev = [e for e in events if e.event_type == EventType.EXIT_SIGNAL][0]
+        assert exit_ev.data["reason"] == "stop_loss"
+
+    def test_no_exit_within_thresholds(self, setup):
+        client, strategy, _ = setup
+        portfolio = Portfolio(initial_balance=Decimal("10000"))
+        portfolio.record_fill(
+            Fill(ticker="POS", side=Side.YES, price=Decimal("0.50"), quantity=10)
+        )
+
+        bus = EventBus()
+        def mock_orderbook(ticker):
+            if ticker == "POS":
+                return Orderbook(
+                    ticker="POS",
+                    yes=tuple([OrderbookLevel(Decimal("0.51"), 50)]),
+                    no=tuple(),
+                )
+            return Orderbook(
+                ticker="T",
+                yes=tuple([OrderbookLevel(Decimal("0.65"), 100)]),
+                no=tuple([OrderbookLevel(Decimal("0.33"), 120)]),
+            )
+        client.get_orderbook.side_effect = mock_orderbook
+
+        run_cycle(
+            client, portfolio, strategy, event_bus=bus, cycle_number=1,
+            take_profit=Decimal("0.10"),
+            stop_loss=Decimal("0.10"),
+        )
+
+        events, _ = bus.drain_from(0)
+        types = [e.event_type for e in events]
+        assert EventType.EXIT_SIGNAL not in types
+        assert EventType.POSITION_CLOSED not in types
+
+    def test_no_exit_when_thresholds_disabled(self, setup):
+        client, strategy, _ = setup
+        portfolio = Portfolio(initial_balance=Decimal("10000"))
+        portfolio.record_fill(
+            Fill(ticker="POS", side=Side.YES, price=Decimal("0.50"), quantity=10)
+        )
+
+        bus = EventBus()
+        def mock_orderbook(ticker):
+            if ticker == "POS":
+                return Orderbook(
+                    ticker="POS",
+                    yes=tuple([OrderbookLevel(Decimal("0.90"), 50)]),
+                    no=tuple(),
+                )
+            return Orderbook(
+                ticker="T",
+                yes=tuple([OrderbookLevel(Decimal("0.65"), 100)]),
+                no=tuple([OrderbookLevel(Decimal("0.33"), 120)]),
+            )
+        client.get_orderbook.side_effect = mock_orderbook
+
+        # Default thresholds are 0 (disabled)
+        run_cycle(
+            client, portfolio, strategy, event_bus=bus, cycle_number=1,
+        )
+
+        events, _ = bus.drain_from(0)
+        types = [e.event_type for e in events]
+        assert EventType.EXIT_SIGNAL not in types
+
+    def test_cycle_end_includes_exits_count(self, setup):
+        client, strategy, _ = setup
+        portfolio = Portfolio(initial_balance=Decimal("10000"))
+        portfolio.record_fill(
+            Fill(ticker="POS", side=Side.YES, price=Decimal("0.50"), quantity=10)
+        )
+
+        bus = EventBus()
+        def mock_orderbook(ticker):
+            if ticker == "POS":
+                return Orderbook(
+                    ticker="POS",
+                    yes=tuple([OrderbookLevel(Decimal("0.55"), 50)]),
+                    no=tuple(),
+                )
+            return Orderbook(
+                ticker="T",
+                yes=tuple([OrderbookLevel(Decimal("0.65"), 100)]),
+                no=tuple([OrderbookLevel(Decimal("0.33"), 120)]),
+            )
+        client.get_orderbook.side_effect = mock_orderbook
+
+        run_cycle(
+            client, portfolio, strategy, event_bus=bus, cycle_number=1,
+            take_profit=Decimal("0.04"),
+        )
+
+        events, _ = bus.drain_from(0)
+        end = [e for e in events if e.event_type == EventType.CYCLE_END][0]
+        assert end.data["exits"] == 1
+
+
+class TestExitMonitoringParser:
+    def test_run_take_profit_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["run", "--take-profit", "0.05"])
+        assert args.take_profit == 0.05
+
+    def test_run_stop_loss_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["run", "--stop-loss", "0.10"])
+        assert args.stop_loss == 0.10
+
+    def test_run_defaults_disabled(self):
+        parser = build_parser()
+        args = parser.parse_args(["run"])
+        assert args.take_profit == 0
+        assert args.stop_loss == 0
+
+    def test_dashboard_take_profit_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["dashboard", "--take-profit", "0.03"])
+        assert args.take_profit == 0.03
+
+    def test_dashboard_stop_loss_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["dashboard", "--stop-loss", "0.08"])
+        assert args.stop_loss == 0.08
+
+
+class TestFormatExitEvents:
+    def test_exit_signal_format(self):
+        e = Event(EventType.EXIT_SIGNAL, time.time(), {
+            "ticker": "POS-A", "side": "yes", "reason": "take_profit",
+            "pnl_per_contract": "0.05",
+        })
+        line = format_event(e)
+        assert "EXIT YES" in line
+        assert "POS-A" in line
+        assert "take_profit" in line
+        assert "0.05" in line
+
+    def test_position_closed_format(self):
+        e = Event(EventType.POSITION_CLOSED, time.time(), {
+            "ticker": "POS-A", "side": "yes", "quantity": 10, "price": "0.55",
+        })
+        line = format_event(e)
+        assert "CLOSED YES" in line
+        assert "POS-A" in line
+        assert "10 contracts" in line
+        assert "0.55" in line
+
+    def test_cycle_end_with_exits(self):
+        e = Event(EventType.CYCLE_END, time.time(), {
+            "cycle": 1, "markets": 5, "signals": 1, "fills": 1, "exits": 2,
+        })
+        line = format_event(e)
+        assert "2 exits" in line
+
+    def test_cycle_end_without_exits(self):
+        e = Event(EventType.CYCLE_END, time.time(), {
+            "cycle": 1, "markets": 5, "signals": 1, "fills": 1, "exits": 0,
+        })
+        line = format_event(e)
+        assert "exits" not in line

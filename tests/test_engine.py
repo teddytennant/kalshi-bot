@@ -255,3 +255,108 @@ class TestCheckSettlements:
 
         engine.check_settlements(["T"])
         assert engine.portfolio.get_position("T", Side.YES) is not None
+
+
+class TestSellPosition:
+    def test_sell_yes_matches_yes_bids(self, engine, mock_client):
+        """Selling YES matches against YES bid levels (highest first)."""
+        engine.portfolio.record_fill(
+            Fill(ticker="T", side=Side.YES, price=Decimal("0.60"), quantity=10)
+        )
+        mock_client.get_orderbook.return_value = Orderbook(
+            ticker="T",
+            yes=tuple([
+                OrderbookLevel(price=Decimal("0.60"), quantity=50),
+                OrderbookLevel(price=Decimal("0.65"), quantity=100),
+            ]),
+            no=tuple(),
+        )
+        fills = engine.sell_position("T", Side.YES, 10)
+        assert len(fills) == 1
+        assert fills[0].price == Decimal("0.65")
+        assert fills[0].quantity == 10
+        assert fills[0].side == Side.YES
+
+    def test_sell_no_matches_no_bids(self, engine, mock_client):
+        """Selling NO matches against NO bid levels."""
+        engine.portfolio.record_fill(
+            Fill(ticker="T", side=Side.NO, price=Decimal("0.30"), quantity=10)
+        )
+        mock_client.get_orderbook.return_value = Orderbook(
+            ticker="T",
+            yes=tuple(),
+            no=tuple([
+                OrderbookLevel(price=Decimal("0.32"), quantity=50),
+                OrderbookLevel(price=Decimal("0.35"), quantity=100),
+            ]),
+        )
+        fills = engine.sell_position("T", Side.NO, 10)
+        assert len(fills) == 1
+        assert fills[0].price == Decimal("0.35")
+        assert fills[0].quantity == 10
+        assert fills[0].side == Side.NO
+
+    def test_walks_multiple_bid_levels(self, engine, mock_client):
+        """Large sells walk through multiple bid levels."""
+        engine.portfolio.record_fill(
+            Fill(ticker="T", side=Side.YES, price=Decimal("0.50"), quantity=30)
+        )
+        mock_client.get_orderbook.return_value = Orderbook(
+            ticker="T",
+            yes=tuple([
+                OrderbookLevel(price=Decimal("0.55"), quantity=10),
+                OrderbookLevel(price=Decimal("0.60"), quantity=15),
+            ]),
+            no=tuple(),
+        )
+        fills = engine.sell_position("T", Side.YES, 25)
+        assert len(fills) == 2
+        # Highest bid first
+        assert fills[0].price == Decimal("0.60")
+        assert fills[0].quantity == 15
+        assert fills[1].price == Decimal("0.55")
+        assert fills[1].quantity == 10
+
+    def test_partial_sell_leaves_remaining(self, engine, mock_client):
+        """Selling part of a position leaves the remainder."""
+        engine.portfolio.record_fill(
+            Fill(ticker="T", side=Side.YES, price=Decimal("0.50"), quantity=20)
+        )
+        mock_client.get_orderbook.return_value = Orderbook(
+            ticker="T",
+            yes=tuple([
+                OrderbookLevel(price=Decimal("0.55"), quantity=100),
+            ]),
+            no=tuple(),
+        )
+        fills = engine.sell_position("T", Side.YES, 5)
+        assert len(fills) == 1
+        assert fills[0].quantity == 5
+        pos = engine.portfolio.get_position("T", Side.YES)
+        assert pos is not None
+        assert pos.quantity == 15
+
+    def test_raises_on_no_position(self, engine, mock_client):
+        with pytest.raises(ValueError, match="No position"):
+            engine.sell_position("T", Side.YES, 10)
+
+    def test_raises_on_exceeds_quantity(self, engine, mock_client):
+        engine.portfolio.record_fill(
+            Fill(ticker="T", side=Side.YES, price=Decimal("0.50"), quantity=5)
+        )
+        with pytest.raises(ValueError, match="exceeds position"):
+            engine.sell_position("T", Side.YES, 10)
+
+    def test_empty_orderbook_no_fills(self, engine, mock_client):
+        """Empty orderbook returns no fills, position unchanged."""
+        engine.portfolio.record_fill(
+            Fill(ticker="T", side=Side.YES, price=Decimal("0.50"), quantity=10)
+        )
+        mock_client.get_orderbook.return_value = Orderbook(
+            ticker="T", yes=tuple(), no=tuple()
+        )
+        fills = engine.sell_position("T", Side.YES, 5)
+        assert fills == []
+        pos = engine.portfolio.get_position("T", Side.YES)
+        assert pos is not None
+        assert pos.quantity == 10

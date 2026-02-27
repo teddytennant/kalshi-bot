@@ -95,12 +95,16 @@ class DashboardApp(App):
         balance: int = 10000,
         series: str = "",
         state_file: str = "state.json",
+        take_profit: Decimal = Decimal("0"),
+        stop_loss: Decimal = Decimal("0"),
     ):
         super().__init__()
         self._interval = interval
         self._initial_balance = balance
         self._series = series
         self._state_file = state_file
+        self._take_profit = take_profit
+        self._stop_loss = stop_loss
         self._event_bus = EventBus()
         self._cursor = 0
         self._cycle_number = 0
@@ -166,6 +170,8 @@ class DashboardApp(App):
                     event_bus=self._event_bus,
                     cycle_number=self._cycle_number,
                     series=self._series,
+                    take_profit=self._take_profit,
+                    stop_loss=self._stop_loss,
                 )
                 save_state(self._portfolio, state_path)
             except Exception as e:
@@ -225,6 +231,18 @@ class DashboardApp(App):
                 activity.write(
                     f"[bold red]\\[{ts}] REJECTED[/] {d.get('ticker', '?')}: "
                     f"{d.get('reason', '?')}"
+                )
+            elif event.event_type == EventType.EXIT_SIGNAL:
+                activity.write(
+                    f"[bold magenta]\\[{ts}] EXIT[/] {d.get('side', '?').upper()} "
+                    f"{d.get('ticker', '?')} reason={d.get('reason', '?')} "
+                    f"pnl={d.get('pnl_per_contract', '?')}"
+                )
+            elif event.event_type == EventType.POSITION_CLOSED:
+                activity.write(
+                    f"[bold green]\\[{ts}] CLOSED[/] {d.get('side', '?').upper()} "
+                    f"{d.get('ticker', '?')}: "
+                    f"{d.get('quantity', '?')} contracts @ {d.get('price', '?')}"
                 )
             elif event.event_type == EventType.MARKET_SCANNED:
                 ticker = d.get("ticker", "?")
