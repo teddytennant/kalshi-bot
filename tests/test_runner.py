@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
+from kalshi_bot.events import EventBus, EventType
 from kalshi_bot.models import (
     Fill,
     Market,
@@ -90,6 +91,21 @@ class TestBuildParser:
         assert args.interval == 60
         assert args.balance == 10000
         assert args.state_file == "state.json"
+
+    def test_dashboard_subcommand(self):
+        parser = build_parser()
+        args = parser.parse_args(["dashboard", "--interval", "30", "--balance", "5000"])
+        assert args.command == "dashboard"
+        assert args.interval == 30
+        assert args.balance == 5000
+
+    def test_dashboard_defaults(self):
+        parser = build_parser()
+        args = parser.parse_args(["dashboard"])
+        assert args.interval == 60
+        assert args.balance == 10000
+        assert args.state_file == "state.json"
+        assert args.series == ""
 
 
 class TestCmdMarkets:
@@ -187,3 +203,145 @@ class TestRunCycle:
             mock_engine.submit_order.return_value = []
             run_cycle(mock_client, portfolio, strategy)
             mock_engine.submit_order.assert_called_once()
+
+
+class TestRunCycleWithEventBus:
+    @pytest.fixture
+    def setup(self, mock_client):
+        market = Market(
+            ticker="T", title="T", status="open", result="",
+            yes_bid=Decimal("0.65"), yes_ask=Decimal("0.67"),
+            no_bid=Decimal("0.33"), no_ask=Decimal("0.35"),
+            volume=1000, open_interest=100,
+            event_ticker="E", series_ticker="S", subtitle="", close_time="",
+        )
+        strategy = MagicMock()
+        strategy.select_markets.return_value = [market]
+        strategy.evaluate.return_value = None
+        mock_client.get_markets.return_value = ([market], "")
+        mock_client.get_orderbook.return_value = Orderbook(
+            ticker="T",
+            yes=tuple([OrderbookLevel(Decimal("0.65"), 100)]),
+            no=tuple([OrderbookLevel(Decimal("0.33"), 120)]),
+        )
+        mock_client.get_trades.return_value = ([], "")
+        return mock_client, strategy, market
+
+    def test_emits_cycle_start_and_end(self, setup):
+        client, strategy, _ = setup
+        bus = EventBus()
+        run_cycle(client, Portfolio(), strategy, event_bus=bus, cycle_number=1)
+
+        events, _ = bus.drain_from(0)
+        types = [e.event_type for e in events]
+        assert EventType.CYCLE_START in types
+        assert EventType.CYCLE_END in types
+        assert events[0].data["cycle"] == 1
+
+    def test_emits_markets_fetched(self, setup):
+        client, strategy, _ = setup
+        bus = EventBus()
+        run_cycle(client, Portfolio(), strategy, event_bus=bus)
+
+        events, _ = bus.drain_from(0)
+        fetched = [e for e in events if e.event_type == EventType.MARKETS_FETCHED]
+        assert len(fetched) == 1
+        assert fetched[0].data["total"] == 1
+        assert fetched[0].data["selected"] == 1
+
+    def test_emits_market_scanned(self, setup):
+        client, strategy, _ = setup
+        bus = EventBus()
+        run_cycle(client, Portfolio(), strategy, event_bus=bus)
+
+        events, _ = bus.drain_from(0)
+        scanned = [e for e in events if e.event_type == EventType.MARKET_SCANNED]
+        assert len(scanned) == 1
+        assert scanned[0].data["ticker"] == "T"
+        assert scanned[0].data["yes_bid"] == "0.65"
+        assert scanned[0].data["yes_ask"] == "0.67"
+        assert scanned[0].data["signal"] is None
+
+    def test_emits_signal_and_fill(self, setup):
+        from kalshi_bot.strategy import TradeSignal
+        from kalshi_bot.models import OrderType, Fill
+
+        client, strategy, _ = setup
+        strategy.evaluate.return_value = TradeSignal(
+            ticker="T", side=Side.YES, order_type=OrderType.LIMIT,
+            price=Decimal("0.65"), quantity=10,
+        )
+
+        bus = EventBus()
+        with patch("kalshi_bot.runner.PaperTradingEngine") as MockEngine:
+            mock_engine = MockEngine.return_value
+            mock_engine.submit_order.return_value = [
+                Fill(ticker="T", side=Side.YES, price=Decimal("0.67"), quantity=10)
+            ]
+            run_cycle(client, Portfolio(), strategy, event_bus=bus)
+
+        events, _ = bus.drain_from(0)
+        types = [e.event_type for e in events]
+        assert EventType.SIGNAL_GENERATED in types
+        assert EventType.ORDER_FILLED in types
+
+        signal_ev = [e for e in events if e.event_type == EventType.SIGNAL_GENERATED][0]
+        assert signal_ev.data["ticker"] == "T"
+        assert signal_ev.data["side"] == "yes"
+
+        fill_ev = [e for e in events if e.event_type == EventType.ORDER_FILLED][0]
+        assert fill_ev.data["quantity"] == 10
+
+    def test_emits_order_rejected(self, setup):
+        from kalshi_bot.strategy import TradeSignal
+        from kalshi_bot.models import OrderType
+
+        client, strategy, _ = setup
+        strategy.evaluate.return_value = TradeSignal(
+            ticker="T", side=Side.YES, order_type=OrderType.LIMIT,
+            price=Decimal("0.65"), quantity=10,
+        )
+
+        bus = EventBus()
+        with patch("kalshi_bot.runner.PaperTradingEngine") as MockEngine:
+            mock_engine = MockEngine.return_value
+            mock_engine.submit_order.side_effect = ValueError("Insufficient balance")
+            run_cycle(client, Portfolio(), strategy, event_bus=bus)
+
+        events, _ = bus.drain_from(0)
+        rejected = [e for e in events if e.event_type == EventType.ORDER_REJECTED]
+        assert len(rejected) == 1
+        assert "Insufficient balance" in rejected[0].data["reason"]
+
+    def test_cycle_end_has_summary(self, setup):
+        client, strategy, _ = setup
+        bus = EventBus()
+        run_cycle(client, Portfolio(), strategy, event_bus=bus, cycle_number=5)
+
+        events, _ = bus.drain_from(0)
+        end = [e for e in events if e.event_type == EventType.CYCLE_END][0]
+        assert end.data["cycle"] == 5
+        assert end.data["markets"] == 1
+        assert end.data["signals"] == 0
+        assert end.data["fills"] == 0
+
+    def test_no_event_bus_still_prints(self, setup, capsys):
+        """Without event_bus, run_cycle should still use print (backward compat)."""
+        from kalshi_bot.strategy import TradeSignal
+        from kalshi_bot.models import OrderType, Fill
+
+        client, strategy, _ = setup
+        strategy.evaluate.return_value = TradeSignal(
+            ticker="T", side=Side.YES, order_type=OrderType.LIMIT,
+            price=Decimal("0.65"), quantity=10,
+        )
+
+        with patch("kalshi_bot.runner.PaperTradingEngine") as MockEngine:
+            mock_engine = MockEngine.return_value
+            mock_engine.submit_order.return_value = [
+                Fill(ticker="T", side=Side.YES, price=Decimal("0.67"), quantity=10)
+            ]
+            run_cycle(client, Portfolio(), strategy)
+
+        captured = capsys.readouterr()
+        assert "Filled YES T" in captured.out

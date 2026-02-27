@@ -7,9 +7,11 @@ import sys
 import time
 from decimal import Decimal
 from pathlib import Path
+from typing import Optional
 
 from kalshi_bot.client import KalshiClient
 from kalshi_bot.engine import PaperTradingEngine
+from kalshi_bot.events import EventBus, EventType
 from kalshi_bot.models import Order, OrderStatus, Side
 from kalshi_bot.persistence import load_state, save_state
 from kalshi_bot.portfolio import Portfolio
@@ -35,6 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
     markets_parser = subparsers.add_parser("markets", help="List available markets")
     markets_parser.add_argument("--series", type=str, default="", help="Filter by series ticker")
     markets_parser.add_argument("--limit", type=int, default=20, help="Max markets to show")
+
+    dash_parser = subparsers.add_parser("dashboard", help="Launch TUI dashboard")
+    dash_parser.add_argument("--interval", type=int, default=60, help="Polling interval in seconds")
+    dash_parser.add_argument("--balance", type=int, default=10000, help="Initial balance in cents")
+    dash_parser.add_argument("--series", type=str, default="", help="Filter by series ticker")
+    dash_parser.add_argument("--state-file", type=str, default="state.json", help="State file path")
 
     return parser
 
@@ -74,18 +82,53 @@ def run_cycle(
     client: KalshiClient,
     portfolio: Portfolio,
     strategy: Strategy,
+    event_bus: Optional[EventBus] = None,
+    cycle_number: int = 0,
 ) -> None:
+    if event_bus:
+        event_bus.emit(EventType.CYCLE_START, cycle=cycle_number)
+
     markets, _ = client.get_markets(limit=100)
     selected = strategy.select_markets(markets)
 
+    if event_bus:
+        event_bus.emit(
+            EventType.MARKETS_FETCHED,
+            cycle=cycle_number,
+            total=len(markets),
+            selected=len(selected),
+        )
+
     engine = PaperTradingEngine(portfolio=portfolio, client=client)
+
+    signals_count = 0
+    fills_count = 0
 
     for market in selected:
         orderbook = client.get_orderbook(market.ticker)
         trades, _ = client.get_trades(ticker=market.ticker)
         signal = strategy.evaluate(market, orderbook, trades, portfolio)
 
+        if event_bus:
+            event_bus.emit(
+                EventType.MARKET_SCANNED,
+                ticker=market.ticker,
+                yes_bid=str(market.yes_bid),
+                yes_ask=str(market.yes_ask),
+                signal=signal.side.value.upper() if signal else None,
+            )
+
         if signal is not None:
+            signals_count += 1
+            if event_bus:
+                event_bus.emit(
+                    EventType.SIGNAL_GENERATED,
+                    ticker=signal.ticker,
+                    side=signal.side.value,
+                    price=str(signal.price),
+                    quantity=signal.quantity,
+                )
+
             order = Order(
                 ticker=signal.ticker,
                 side=signal.side,
@@ -98,15 +141,42 @@ def run_cycle(
                 fills = engine.submit_order(order)
                 if fills:
                     total = sum(f.total_cost for f in fills)
-                    print(f"  Filled {signal.side.value.upper()} {signal.ticker}: "
-                          f"{sum(f.quantity for f in fills)} contracts, cost {total}")
+                    qty = sum(f.quantity for f in fills)
+                    fills_count += len(fills)
+                    if event_bus:
+                        event_bus.emit(
+                            EventType.ORDER_FILLED,
+                            ticker=signal.ticker,
+                            side=signal.side.value,
+                            quantity=qty,
+                            total_cost=str(total),
+                        )
+                    else:
+                        print(f"  Filled {signal.side.value.upper()} {signal.ticker}: "
+                              f"{qty} contracts, cost {total}")
             except ValueError as e:
-                print(f"  Order rejected: {e}")
+                if event_bus:
+                    event_bus.emit(
+                        EventType.ORDER_REJECTED,
+                        ticker=signal.ticker,
+                        reason=str(e),
+                    )
+                else:
+                    print(f"  Order rejected: {e}")
 
     # Check for settlements on held positions
     held_tickers = list({ticker for ticker, _ in portfolio.positions})
     if held_tickers:
         engine.check_settlements(held_tickers)
+
+    if event_bus:
+        event_bus.emit(
+            EventType.CYCLE_END,
+            cycle=cycle_number,
+            markets=len(selected),
+            signals=signals_count,
+            fills=fills_count,
+        )
 
 
 def main() -> None:
@@ -152,6 +222,16 @@ def main() -> None:
             print("\nStopping...")
             save_state(portfolio, state_path)
             print(f"State saved to {state_path}")
+    elif args.command == "dashboard":
+        from kalshi_bot.tui import DashboardApp
+
+        app = DashboardApp(
+            interval=args.interval,
+            balance=args.balance,
+            series=args.series,
+            state_file=args.state_file,
+        )
+        app.run()
 
 
 if __name__ == "__main__":
