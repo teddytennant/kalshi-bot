@@ -32,6 +32,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--state-file", type=str, default="state.json", help="State file path")
     run_parser.add_argument("--cycles", type=int, default=0, help="Run N cycles then exit (0=infinite)")
     run_parser.add_argument("--verbose", "-v", action="store_true", help="Show all events including market scans")
+    run_parser.add_argument("--threshold", type=float, default=0.05, help="Mean reversion threshold (default: 0.05)")
+    run_parser.add_argument("--quantity", type=int, default=10, help="Contracts per trade (default: 10)")
+    run_parser.add_argument("--window", type=int, default=10, help="Trade history window (default: 10)")
+    run_parser.add_argument("--min-volume", type=int, default=0, help="Min market volume filter")
 
     status_parser = subparsers.add_parser("status", help="Show portfolio status")
     status_parser.add_argument("--state-file", type=str, default="state.json", help="State file path")
@@ -352,9 +356,10 @@ def main() -> None:
                   f"positions={len(portfolio.positions)}")
 
         strategy = MeanReversionStrategy(
-            window=10,
-            threshold=Decimal("0.05"),
-            order_quantity=10,
+            window=args.window,
+            threshold=Decimal(str(args.threshold)),
+            order_quantity=args.quantity,
+            min_volume=args.min_volume,
         )
 
         cmd_run(
