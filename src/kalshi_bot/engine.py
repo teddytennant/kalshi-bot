@@ -45,14 +45,16 @@ class PaperTradingEngine:
     def _compute_ask_levels(
         self, bid_levels: tuple[OrderbookLevel, ...]
     ) -> list[OrderbookLevel]:
-        """Convert bid levels to ask levels: ask = 1.00 - bid."""
-        return [
+        """Convert bid levels to ask levels: ask = 1.00 - bid, sorted cheapest first."""
+        levels = [
             OrderbookLevel(
                 price=Decimal("1.00") - level.price,
                 quantity=level.quantity,
             )
             for level in bid_levels
         ]
+        levels.sort(key=lambda l: l.price)
+        return levels
 
     def _match(self, order: Order, ask_levels: list[OrderbookLevel]) -> list[Fill]:
         fills: list[Fill] = []
