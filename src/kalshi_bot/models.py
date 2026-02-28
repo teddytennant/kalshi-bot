@@ -94,11 +94,15 @@ class Orderbook:
 
     @property
     def best_yes_bid(self) -> Optional[Decimal]:
-        return self.yes[0].price if self.yes else None
+        if not self.yes:
+            return None
+        return max(level.price for level in self.yes)
 
     @property
     def best_no_bid(self) -> Optional[Decimal]:
-        return self.no[0].price if self.no else None
+        if not self.no:
+            return None
+        return max(level.price for level in self.no)
 
     @property
     def yes_ask(self) -> Optional[Decimal]:
