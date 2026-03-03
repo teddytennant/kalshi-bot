@@ -95,6 +95,10 @@ class DashboardApp(App):
         balance: int = 10000,
         series: str = "",
         state_file: str = "state.json",
+        threshold: Decimal = Decimal("0.05"),
+        order_quantity: int = 10,
+        window: int = 10,
+        min_volume: int = 0,
         take_profit: Decimal = Decimal("0"),
         stop_loss: Decimal = Decimal("0"),
     ):
@@ -103,6 +107,10 @@ class DashboardApp(App):
         self._initial_balance = balance
         self._series = series
         self._state_file = state_file
+        self._threshold = threshold
+        self._order_quantity = order_quantity
+        self._window = window
+        self._min_volume = min_volume
         self._take_profit = take_profit
         self._stop_loss = stop_loss
         self._event_bus = EventBus()
@@ -150,9 +158,10 @@ class DashboardApp(App):
 
         client = KalshiClient()
         strategy = MeanReversionStrategy(
-            window=10,
-            threshold=Decimal("0.05"),
-            order_quantity=10,
+            window=self._window,
+            threshold=self._threshold,
+            order_quantity=self._order_quantity,
+            min_volume=self._min_volume,
         )
         state_path = Path(self._state_file)
 
