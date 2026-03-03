@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run", help="Start the paper trading loop")
     run_parser.add_argument("--interval", type=int, default=60, help="Polling interval in seconds")
-    run_parser.add_argument("--balance", type=int, default=10000, help="Initial balance in cents")
+    run_parser.add_argument("--balance", type=int, default=10000, help="Initial balance in dollars")
     run_parser.add_argument("--series", type=str, default="", help="Filter by series ticker")
     run_parser.add_argument("--state-file", type=str, default="state.json", help="State file path")
     run_parser.add_argument("--cycles", type=int, default=0, help="Run N cycles then exit (0=infinite)")
@@ -48,9 +48,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     dash_parser = subparsers.add_parser("dashboard", help="Launch TUI dashboard")
     dash_parser.add_argument("--interval", type=int, default=60, help="Polling interval in seconds")
-    dash_parser.add_argument("--balance", type=int, default=10000, help="Initial balance in cents")
+    dash_parser.add_argument("--balance", type=int, default=10000, help="Initial balance in dollars")
     dash_parser.add_argument("--series", type=str, default="", help="Filter by series ticker")
     dash_parser.add_argument("--state-file", type=str, default="state.json", help="State file path")
+    dash_parser.add_argument("--threshold", type=float, default=0.05, help="Mean reversion threshold (default: 0.05)")
+    dash_parser.add_argument("--quantity", type=int, default=10, help="Contracts per trade (default: 10)")
+    dash_parser.add_argument("--window", type=int, default=10, help="Trade history window (default: 10)")
+    dash_parser.add_argument("--min-volume", type=int, default=0, help="Min market volume filter")
     dash_parser.add_argument("--take-profit", type=float, default=0, help="Sell when per-contract gain >= threshold (0=disabled)")
     dash_parser.add_argument("--stop-loss", type=float, default=0, help="Sell when per-contract loss >= threshold (0=disabled)")
 
@@ -338,8 +342,15 @@ def run_cycle(
                     else:
                         print(f"  Closed {side.value.upper()} {ticker}: "
                               f"{qty} contracts ({reason})")
-            except ValueError:
-                pass
+            except ValueError as e:
+                if event_bus:
+                    event_bus.emit(
+                        EventType.ORDER_REJECTED,
+                        ticker=ticker,
+                        reason=str(e),
+                    )
+                else:
+                    print(f"  Exit sell failed for {ticker}: {e}")
 
     # Check for settlements on held positions
     held_tickers = list({ticker for ticker, _ in portfolio.positions})
@@ -466,6 +477,10 @@ def main() -> None:
             balance=args.balance,
             series=args.series,
             state_file=args.state_file,
+            threshold=Decimal(str(args.threshold)),
+            order_quantity=args.quantity,
+            window=args.window,
+            min_volume=args.min_volume,
             take_profit=Decimal(str(args.take_profit)),
             stop_loss=Decimal(str(args.stop_loss)),
         )
