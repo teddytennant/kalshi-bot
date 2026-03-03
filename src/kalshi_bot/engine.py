@@ -30,7 +30,7 @@ class PaperTradingEngine:
 
         fills = self._match(order, levels)
 
-        if order.order_type == OrderType.MARKET and fills:
+        if fills:
             total_cost = sum(f.total_cost for f in fills)
             if total_cost > self.portfolio.balance:
                 raise ValueError(
