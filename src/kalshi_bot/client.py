@@ -22,7 +22,7 @@ class KalshiClient:
 
     def _get(self, path: str, params: Optional[dict] = None) -> dict:
         url = f"{self.base_url}{path}"
-        resp = self.session.get(url, params=params)
+        resp = self.session.get(url, params=params, timeout=10)
         resp.raise_for_status()
         return resp.json()
 
