@@ -117,6 +117,8 @@ def find_edge_markets(client):
                             "title": m.title[:60],
                         })
                     no_ask = Decimal("1.00") - m.yes_bid
+                    if no_ask <= 0:
+                        continue
                     no_mean = Decimal("1.00") - mean
                     no_edge = no_mean - no_ask
                     if no_edge > Decimal("0"):
@@ -193,6 +195,8 @@ def run():
         if opp["edge"] <= opp["spread"]:
             continue
         budget = min(Decimal("500"), portfolio.balance * Decimal("0.06"))
+        if opp["ask"] <= 0:
+            continue
         qty = min(500, int(budget / opp["ask"]))
         if qty >= 20:
             print(f"  {opp['title']}")
@@ -269,6 +273,8 @@ def run():
                     if opp["edge"] <= opp["spread"]:
                         continue
                     budget = min(Decimal("400"), portfolio.balance * Decimal("0.05"))
+                    if opp["ask"] <= 0:
+                        continue
                     qty = min(300, int(budget / opp["ask"]))
                     if qty >= 20:
                         bought, _ = buy(engine, portfolio, ticker, side, opp["ask"], qty,
