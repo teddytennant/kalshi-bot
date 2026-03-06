@@ -24,6 +24,10 @@ class Portfolio:
         }
 
     def record_fill(self, fill: Fill) -> None:
+        if fill.total_cost > self.balance:
+            raise ValueError(
+                f"Insufficient balance: need {fill.total_cost}, have {self.balance}"
+            )
         key = (fill.ticker, fill.side)
         self.balance -= fill.total_cost
 
@@ -52,6 +56,8 @@ class Portfolio:
         close_price: Decimal,
         quantity: int,
     ) -> None:
+        if quantity <= 0:
+            raise ValueError("Quantity must be positive")
         key = (ticker, side)
         pos = self._positions.get(key)
         if pos is None:
