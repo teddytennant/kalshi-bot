@@ -128,11 +128,17 @@ class TestOrderbook:
         # YES ask = 1.00 - best NO bid
         assert ob.yes_ask == Decimal("0.67")
 
+    def test_no_ask_from_yes_bid(self, sample_orderbook_response):
+        ob = Orderbook.from_api("T", sample_orderbook_response)
+        # NO ask = 1.00 - best YES bid
+        assert ob.no_ask == Decimal("0.35")
+
     def test_empty_orderbook(self):
         ob = Orderbook(ticker="T", yes=(), no=())
         assert ob.best_yes_bid is None
         assert ob.best_no_bid is None
         assert ob.yes_ask is None
+        assert ob.no_ask is None
 
 
 class TestPublicTrade:
