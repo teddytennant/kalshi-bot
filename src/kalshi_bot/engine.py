@@ -15,6 +15,9 @@ class PaperTradingEngine:
         self.client = client
 
     def submit_order(self, order: Order) -> list[Fill]:
+        if order.quantity <= 0:
+            raise ValueError("Quantity must be positive")
+
         if order.order_type == OrderType.LIMIT and order.price is not None:
             if order.price <= Decimal("0.00") or order.price > Decimal("1.00"):
                 raise ValueError("Price must be between 0.01 and 1.00")
@@ -87,6 +90,9 @@ class PaperTradingEngine:
         Sell YES -> match against orderbook.yes bids (buyers of YES)
         Sell NO  -> match against orderbook.no bids (buyers of NO)
         """
+        if quantity <= 0:
+            raise ValueError("Quantity must be positive")
+
         position = self.portfolio.get_position(ticker, side)
         if position is None:
             raise ValueError(f"No position for {ticker} {side.value}")
