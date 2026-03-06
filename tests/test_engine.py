@@ -212,6 +212,32 @@ class TestValidation:
         fills = engine.submit_order(order)
         assert len(fills) == 0
 
+    def test_zero_quantity_rejected(self, engine, mock_client, sample_orderbook):
+        mock_client.get_orderbook.return_value = sample_orderbook
+        order = Order(
+            ticker="T",
+            side=Side.YES,
+            order_type=OrderType.MARKET,
+            price=None,
+            quantity=0,
+            status=OrderStatus.PENDING,
+        )
+        with pytest.raises(ValueError, match="Quantity must be positive"):
+            engine.submit_order(order)
+
+    def test_negative_quantity_rejected(self, engine, mock_client, sample_orderbook):
+        mock_client.get_orderbook.return_value = sample_orderbook
+        order = Order(
+            ticker="T",
+            side=Side.YES,
+            order_type=OrderType.MARKET,
+            price=None,
+            quantity=-5,
+            status=OrderStatus.PENDING,
+        )
+        with pytest.raises(ValueError, match="Quantity must be positive"):
+            engine.submit_order(order)
+
 
 class TestPortfolioIntegration:
     def test_fill_recorded_in_portfolio(self, engine, mock_client, sample_orderbook):
@@ -360,3 +386,17 @@ class TestSellPosition:
         pos = engine.portfolio.get_position("T", Side.YES)
         assert pos is not None
         assert pos.quantity == 10
+
+    def test_sell_zero_quantity_rejected(self, engine, mock_client):
+        engine.portfolio.record_fill(
+            Fill(ticker="T", side=Side.YES, price=Decimal("0.50"), quantity=10)
+        )
+        with pytest.raises(ValueError, match="Quantity must be positive"):
+            engine.sell_position("T", Side.YES, 0)
+
+    def test_sell_negative_quantity_rejected(self, engine, mock_client):
+        engine.portfolio.record_fill(
+            Fill(ticker="T", side=Side.YES, price=Decimal("0.50"), quantity=10)
+        )
+        with pytest.raises(ValueError, match="Quantity must be positive"):
+            engine.sell_position("T", Side.YES, -3)
