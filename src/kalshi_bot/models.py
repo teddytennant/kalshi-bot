@@ -110,6 +110,12 @@ class Orderbook:
             return None
         return Decimal("1.00") - self.best_no_bid
 
+    @property
+    def no_ask(self) -> Optional[Decimal]:
+        if self.best_yes_bid is None:
+            return None
+        return Decimal("1.00") - self.best_yes_bid
+
 
 @dataclass(frozen=True)
 class PublicTrade:
