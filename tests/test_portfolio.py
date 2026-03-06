@@ -69,6 +69,12 @@ class TestRecordFill:
         assert yes_pos.quantity == 10
         assert no_pos.quantity == 5
 
+    def test_fill_exceeding_balance_rejected(self):
+        p = Portfolio(initial_balance=Decimal("5.00"))
+        fill = Fill(ticker="T", side=Side.YES, price=Decimal("0.65"), quantity=10)
+        with pytest.raises(ValueError, match="Insufficient balance"):
+            p.record_fill(fill)
+
 
 class TestGetPosition:
     def test_returns_none_for_no_position(self):
@@ -121,6 +127,12 @@ class TestClosePosition:
         p.record_fill(Fill(ticker="T", side=Side.YES, price=Decimal("0.60"), quantity=5))
         with pytest.raises(ValueError, match="exceeds"):
             p.close_position("T", Side.YES, close_price=Decimal("0.70"), quantity=10)
+
+    def test_close_zero_quantity_raises(self):
+        p = Portfolio()
+        p.record_fill(Fill(ticker="T", side=Side.YES, price=Decimal("0.60"), quantity=5))
+        with pytest.raises(ValueError, match="Quantity must be positive"):
+            p.close_position("T", Side.YES, close_price=Decimal("0.70"), quantity=0)
 
 
 class TestSettleMarket:
