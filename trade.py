@@ -150,7 +150,11 @@ def find_edge_markets(client):
 def print_status(portfolio, label=""):
     invested = sum(pos.avg_price * pos.quantity for pos in portfolio.positions.values())
     total = portfolio.balance + invested
-    ret = (total - portfolio.initial_balance) / portfolio.initial_balance * 100
+    ret = (
+        (total - portfolio.initial_balance) / portfolio.initial_balance * 100
+        if portfolio.initial_balance
+        else Decimal("0")
+    )
     print(f"  {label}Balance: ${portfolio.balance:.2f} | Invested: ${invested:.2f} | "
           f"Total: ${total:.2f} | P&L: ${portfolio.realized_pnl:.2f} | Return: {ret:+.2f}%")
 
@@ -230,87 +234,91 @@ def run():
     cycle = 0
     last_full_print = 0
 
-    while time.time() < end_time:
-        cycle += 1
-        elapsed_min = (time.time() - start_time) / 60
-        elapsed_hr = elapsed_min / 60
+    try:
+        while time.time() < end_time:
+            cycle += 1
+            elapsed_min = (time.time() - start_time) / 60
+            elapsed_hr = elapsed_min / 60
 
-        # Check settlements every cycle
-        settled = check_settlements(client, engine, portfolio)
-        if settled > 0:
-            save_state(portfolio, STATE_FILE)
-            print_status(portfolio, f"  [{elapsed_hr:.1f}h] ")
+            # Check settlements every cycle
+            settled = check_settlements(client, engine, portfolio)
+            if settled > 0:
+                save_state(portfolio, STATE_FILE)
+                print_status(portfolio, f"  [{elapsed_hr:.1f}h] ")
 
-        # Every 30 min: check for new opportunities and take profit
-        if cycle % 6 == 0 and portfolio.balance > Decimal("200"):
-            # Check for take-profit opportunities (bid > entry + 3c)
-            for (ticker, side), pos in list(portfolio.positions.items()):
+            # Every 30 min: check for new opportunities and take profit
+            if cycle % 6 == 0 and portfolio.balance > Decimal("200"):
+                # Check for take-profit opportunities (bid > entry + 3c)
+                for (ticker, side), pos in list(portfolio.positions.items()):
+                    try:
+                        ob = client.get_orderbook(ticker)
+                        bid = ob.best_yes_bid if side == Side.YES else ob.best_no_bid
+                        if bid and bid >= pos.avg_price + Decimal("0.03"):
+                            fills = engine.sell_position(ticker, side, pos.quantity)
+                            if fills:
+                                total = sum(f.total_cost for f in fills)
+                                qty = sum(f.quantity for f in fills)
+                                pnl = total - pos.avg_price * qty
+                                name = ticker.split("-")[-1]
+                                print(f"  [{elapsed_hr:.1f}h] TAKE PROFIT {name}: "
+                                      f"{qty} contracts, P&L: {pnl:+.2f}")
+                                save_state(portfolio, STATE_FILE)
+                    except Exception as e:
+                        print(f"  WARNING: take-profit check failed for {ticker}: {e}")
+
+            # Every hour: look for new edge-based opportunities
+            if cycle % 12 == 0 and portfolio.balance > Decimal("500"):
                 try:
-                    ob = client.get_orderbook(ticker)
-                    bid = ob.best_yes_bid if side == Side.YES else ob.best_no_bid
-                    if bid and bid >= pos.avg_price + Decimal("0.03"):
-                        fills = engine.sell_position(ticker, side, pos.quantity)
-                        if fills:
-                            total = sum(f.total_cost for f in fills)
-                            qty = sum(f.quantity for f in fills)
-                            pnl = total - pos.avg_price * qty
+                    new_opps = find_edge_markets(client)
+                    for opp in new_opps[:3]:
+                        ticker = opp["ticker"]
+                        side = opp["side"]
+                        if portfolio.get_position(ticker, side):
+                            continue
+                        if opp["edge"] <= opp["spread"]:
+                            continue
+                        budget = min(Decimal("400"), portfolio.balance * Decimal("0.05"))
+                        if opp["ask"] <= 0:
+                            continue
+                        qty = min(300, int(budget / opp["ask"]))
+                        if qty >= 20:
+                            bought, _ = buy(engine, portfolio, ticker, side, opp["ask"], qty,
+                                            ticker.split("-")[-1])
+                            if bought:
+                                save_state(portfolio, STATE_FILE)
+                                break
+                except Exception as e:
+                    print(f"  WARNING: edge scan failed: {e}")
+
+            # Print status every hour
+            if elapsed_min - last_full_print >= 60:
+                last_full_print = elapsed_min
+                print()
+                print_status(portfolio, f"  [{elapsed_hr:.1f}h] ")
+                # Show position P&L
+                for (ticker, side), pos in portfolio.positions.items():
+                    try:
+                        ob = client.get_orderbook(ticker)
+                        bid = ob.best_yes_bid if side == Side.YES else ob.best_no_bid
+                        if bid:
+                            pnl_per = bid - pos.avg_price
                             name = ticker.split("-")[-1]
-                            print(f"  [{elapsed_hr:.1f}h] TAKE PROFIT {name}: "
-                                  f"{qty} contracts, P&L: {pnl:+.2f}")
-                            save_state(portfolio, STATE_FILE)
-                except Exception as e:
-                    print(f"  WARNING: take-profit check failed for {ticker}: {e}")
+                            m = client.get_market(ticker)
+                            status = m.status
+                            print(f"    {name:>12}: bid={bid} pnl/c={pnl_per:+.4f} "
+                                  f"qty={pos.quantity} status={status}")
+                    except Exception as e:
+                        print(f"  WARNING: status check failed for {ticker}: {e}")
 
-        # Every hour: look for new edge-based opportunities
-        if cycle % 12 == 0 and portfolio.balance > Decimal("500"):
-            try:
-                new_opps = find_edge_markets(client)
-                for opp in new_opps[:3]:
-                    ticker = opp["ticker"]
-                    side = opp["side"]
-                    if portfolio.get_position(ticker, side):
-                        continue
-                    if opp["edge"] <= opp["spread"]:
-                        continue
-                    budget = min(Decimal("400"), portfolio.balance * Decimal("0.05"))
-                    if opp["ask"] <= 0:
-                        continue
-                    qty = min(300, int(budget / opp["ask"]))
-                    if qty >= 20:
-                        bought, _ = buy(engine, portfolio, ticker, side, opp["ask"], qty,
-                                        ticker.split("-")[-1])
-                        if bought:
-                            save_state(portfolio, STATE_FILE)
-                            break
-            except Exception as e:
-                print(f"  WARNING: edge scan failed: {e}")
+            save_state(portfolio, STATE_FILE)
 
-        # Print status every hour
-        if elapsed_min - last_full_print >= 60:
-            last_full_print = elapsed_min
-            print()
-            print_status(portfolio, f"  [{elapsed_hr:.1f}h] ")
-            # Show position P&L
-            for (ticker, side), pos in portfolio.positions.items():
-                try:
-                    ob = client.get_orderbook(ticker)
-                    bid = ob.best_yes_bid if side == Side.YES else ob.best_no_bid
-                    if bid:
-                        pnl_per = bid - pos.avg_price
-                        name = ticker.split("-")[-1]
-                        m = client.get_market(ticker)
-                        status = m.status
-                        print(f"    {name:>12}: bid={bid} pnl/c={pnl_per:+.4f} "
-                              f"qty={pos.quantity} status={status}")
-                except Exception as e:
-                    print(f"  WARNING: status check failed for {ticker}: {e}")
-
+            # Sleep 5 min between cycles
+            sleep_time = min(300, max(0, end_time - time.time()))
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+    except KeyboardInterrupt:
+        print("\n\nInterrupted! Saving state...")
         save_state(portfolio, STATE_FILE)
-
-        # Sleep 5 min between cycles
-        sleep_time = min(300, max(0, end_time - time.time()))
-        if sleep_time > 0:
-            time.sleep(sleep_time)
 
     # =====================================================
     # PHASE 3: Final settlement check + sell all
@@ -336,7 +344,11 @@ def run():
     print("=" * 60)
     print("  SESSION COMPLETE")
     print("=" * 60)
-    ret = (portfolio.balance - portfolio.initial_balance) / portfolio.initial_balance * 100
+    ret = (
+        (portfolio.balance - portfolio.initial_balance) / portfolio.initial_balance * 100
+        if portfolio.initial_balance
+        else Decimal("0")
+    )
     print(f"  Final Balance:   ${portfolio.balance:.2f}")
     print(f"  Initial Balance: ${portfolio.initial_balance:.2f}")
     print(f"  Realized P&L:    ${portfolio.realized_pnl:.2f}")
