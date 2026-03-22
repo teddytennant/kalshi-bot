@@ -121,6 +121,7 @@ class DashboardApp(App):
         self._paused.set()  # starts unpaused
         self._market_prices: dict[str, tuple[str, str]] = {}
         self._portfolio: Portfolio | None = None
+        self._portfolio_lock = threading.Lock()
         self._should_stop = threading.Event()
 
     def compose(self) -> ComposeResult:
@@ -172,17 +173,18 @@ class DashboardApp(App):
 
             self._cycle_number += 1
             try:
-                run_cycle(
-                    client,
-                    self._portfolio,
-                    strategy,
-                    event_bus=self._event_bus,
-                    cycle_number=self._cycle_number,
-                    series=self._series,
-                    take_profit=self._take_profit,
-                    stop_loss=self._stop_loss,
-                )
-                save_state(self._portfolio, state_path)
+                with self._portfolio_lock:
+                    run_cycle(
+                        client,
+                        self._portfolio,
+                        strategy,
+                        event_bus=self._event_bus,
+                        cycle_number=self._cycle_number,
+                        series=self._series,
+                        take_profit=self._take_profit,
+                        stop_loss=self._stop_loss,
+                    )
+                    save_state(self._portfolio, state_path)
             except Exception as e:
                 self._event_bus.emit(
                     EventType.CYCLE_ERROR,
@@ -282,11 +284,15 @@ class DashboardApp(App):
     def _refresh_header(self) -> None:
         if self._portfolio is None:
             return
+        with self._portfolio_lock:
+            balance = self._portfolio.balance
+            initial_balance = self._portfolio.initial_balance
+            realized_pnl = self._portfolio.realized_pnl
         header_bar = self.query_one("#header-bar", HeaderBar)
         header_bar.update_stats(
-            balance=self._portfolio.balance,
-            initial_balance=self._portfolio.initial_balance,
-            realized_pnl=self._portfolio.realized_pnl,
+            balance=balance,
+            initial_balance=initial_balance,
+            realized_pnl=realized_pnl,
             cycle=self._cycle_number,
             start_time=self._start_time,
         )
@@ -294,9 +300,11 @@ class DashboardApp(App):
     def _refresh_positions(self) -> None:
         if self._portfolio is None:
             return
+        with self._portfolio_lock:
+            positions = self._portfolio.positions
         pos_table = self.query_one("#positions", DataTable)
         pos_table.clear()
-        for (ticker, side), pos in self._portfolio.positions.items():
+        for (ticker, side), pos in positions.items():
             prices = self._market_prices.get(ticker)
             if prices and side == Side.YES:
                 current = Decimal(prices[0])  # yes_bid
