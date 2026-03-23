@@ -9,12 +9,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
+from kalshi_bot.analytics import Analytics
 from kalshi_bot.client import KalshiClient
 from kalshi_bot.engine import PaperTradingEngine
 from kalshi_bot.events import Event, EventBus, EventType
 from kalshi_bot.models import Order, OrderStatus, Side
 from kalshi_bot.persistence import load_state, save_state
 from kalshi_bot.portfolio import Portfolio
+from kalshi_bot.risk import RiskManager
 from kalshi_bot.strategy import MeanReversionStrategy, Strategy, TradeSignal
 
 
@@ -38,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--min-volume", type=int, default=0, help="Min market volume filter")
     run_parser.add_argument("--take-profit", type=float, default=0, help="Sell when per-contract gain >= threshold (0=disabled)")
     run_parser.add_argument("--stop-loss", type=float, default=0, help="Sell when per-contract loss >= threshold (0=disabled)")
+    run_parser.add_argument("--max-spread", type=float, default=0, help="Max bid-ask spread to trade (0=unlimited)")
+    run_parser.add_argument("--max-position-size", type=int, default=0, help="Max contracts per position (0=unlimited)")
+    run_parser.add_argument("--max-positions", type=int, default=0, help="Max open positions (0=unlimited)")
+    run_parser.add_argument("--max-portfolio-pct", type=float, default=0, help="Max %% of balance invested (0=unlimited)")
+    run_parser.add_argument("--max-loss-pct", type=float, default=0, help="Stop trading if portfolio drops this %% (0=disabled)")
 
     status_parser = subparsers.add_parser("status", help="Show portfolio status")
     status_parser.add_argument("--state-file", type=str, default="state.json", help="State file path")
@@ -57,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     dash_parser.add_argument("--min-volume", type=int, default=0, help="Min market volume filter")
     dash_parser.add_argument("--take-profit", type=float, default=0, help="Sell when per-contract gain >= threshold (0=disabled)")
     dash_parser.add_argument("--stop-loss", type=float, default=0, help="Sell when per-contract loss >= threshold (0=disabled)")
+    dash_parser.add_argument("--max-spread", type=float, default=0, help="Max bid-ask spread to trade (0=unlimited)")
+    dash_parser.add_argument("--max-position-size", type=int, default=0, help="Max contracts per position (0=unlimited)")
+    dash_parser.add_argument("--max-positions", type=int, default=0, help="Max open positions (0=unlimited)")
+    dash_parser.add_argument("--max-portfolio-pct", type=float, default=0, help="Max %% of balance invested (0=unlimited)")
+    dash_parser.add_argument("--max-loss-pct", type=float, default=0, help="Stop trading if portfolio drops this %% (0=disabled)")
 
     return parser
 
@@ -207,6 +219,8 @@ def run_cycle(
     series: str = "",
     take_profit: Decimal = Decimal("0"),
     stop_loss: Decimal = Decimal("0"),
+    risk_manager: Optional[RiskManager] = None,
+    analytics: Optional[Analytics] = None,
 ) -> None:
     if event_bus:
         event_bus.emit(EventType.CYCLE_START, cycle=cycle_number)
@@ -254,6 +268,20 @@ def run_cycle(
                     price=str(signal.price),
                     quantity=signal.quantity,
                 )
+
+            # Risk check before submitting
+            if risk_manager is not None:
+                rejection = risk_manager.check(signal, portfolio)
+                if rejection is not None:
+                    if event_bus:
+                        event_bus.emit(
+                            EventType.ORDER_REJECTED,
+                            ticker=signal.ticker,
+                            reason=f"RISK: {rejection.reason}",
+                        )
+                    else:
+                        print(f"  Risk rejected: {rejection.reason}")
+                    continue
 
             order = Order(
                 ticker=signal.ticker,
@@ -325,18 +353,26 @@ def run_cycle(
                 )
 
             try:
+                entry_price = pos.avg_price
                 sell_fills = engine.sell_position(ticker, side, pos.quantity)
                 if sell_fills:
                     exits_count += 1
                     total = sum(f.total_cost for f in sell_fills)
                     qty = sum(f.quantity for f in sell_fills)
+                    avg_exit = total / qty if qty else Decimal("0")
+                    if analytics is not None:
+                        analytics.record_close(
+                            ticker=ticker, side=side,
+                            entry_price=entry_price, exit_price=avg_exit,
+                            quantity=qty,
+                        )
                     if event_bus:
                         event_bus.emit(
                             EventType.POSITION_CLOSED,
                             ticker=ticker,
                             side=side.value,
                             quantity=qty,
-                            price=str(total / qty) if qty else "0",
+                            price=str(avg_exit),
                             reason=reason,
                         )
                     else:
@@ -355,7 +391,32 @@ def run_cycle(
     # Check for settlements on held positions
     held_tickers = list({ticker for ticker, _ in portfolio.positions})
     if held_tickers:
+        # Snapshot positions before settlement for analytics
+        pre_settle_positions = {
+            (t, s): pos for (t, s), pos in portfolio.positions.items()
+            if t in held_tickers
+        }
         engine.check_settlements(held_tickers)
+        # Record settlements in analytics
+        if analytics is not None:
+            for (t, s), pos in pre_settle_positions.items():
+                if (t, s) not in portfolio.positions:
+                    # Position was settled
+                    market = client.get_market(t)
+                    if market.status == "settled":
+                        won = s.value == market.result
+                        settle_price = Decimal("1.00") if won else Decimal("0.00")
+                        analytics.record_close(
+                            ticker=t, side=s,
+                            entry_price=pos.avg_price,
+                            exit_price=settle_price,
+                            quantity=pos.quantity,
+                        )
+
+    # Record portfolio snapshot for drawdown tracking
+    if analytics is not None:
+        invested = sum(pos.cost_basis for pos in portfolio.positions.values())
+        analytics.record_snapshot(cycle_number, portfolio.balance, invested)
 
     if event_bus:
         event_bus.emit(
@@ -379,9 +440,11 @@ def cmd_run(
     series: str = "",
     take_profit: Decimal = Decimal("0"),
     stop_loss: Decimal = Decimal("0"),
+    risk_manager: Optional[RiskManager] = None,
 ) -> None:
     """Run the trading loop with structured event output."""
     event_bus = EventBus()
+    analytics = Analytics()
     cursor = 0
     cycle = 0
 
@@ -401,6 +464,8 @@ def cmd_run(
                     series=series,
                     take_profit=take_profit,
                     stop_loss=stop_loss,
+                    risk_manager=risk_manager,
+                    analytics=analytics,
                 )
                 save_state(portfolio, state_path)
             except Exception as e:
@@ -424,6 +489,11 @@ def cmd_run(
 
     save_state(portfolio, state_path)
     print(f"State saved to {state_path}")
+
+    # Print trade performance report
+    if analytics.trade_count > 0:
+        print()
+        print(analytics.format_report())
 
 
 def main() -> None:
@@ -455,6 +525,14 @@ def main() -> None:
             threshold=Decimal(str(args.threshold)),
             order_quantity=args.quantity,
             min_volume=args.min_volume,
+            max_spread=Decimal(str(args.max_spread)) if args.max_spread > 0 else None,
+        )
+
+        risk_mgr = RiskManager(
+            max_position_size=args.max_position_size,
+            max_positions=args.max_positions,
+            max_portfolio_pct=Decimal(str(args.max_portfolio_pct)),
+            max_loss_pct=Decimal(str(args.max_loss_pct)),
         )
 
         cmd_run(
@@ -468,6 +546,7 @@ def main() -> None:
             series=args.series,
             take_profit=Decimal(str(args.take_profit)),
             stop_loss=Decimal(str(args.stop_loss)),
+            risk_manager=risk_mgr,
         )
     elif args.command == "dashboard":
         from kalshi_bot.tui import DashboardApp

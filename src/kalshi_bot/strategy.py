@@ -43,11 +43,13 @@ class MeanReversionStrategy(Strategy):
         threshold: Decimal = Decimal("0.05"),
         order_quantity: int = 10,
         min_volume: int = 0,
+        max_spread: Optional[Decimal] = None,
     ):
         self.window = window
         self.threshold = threshold
         self.order_quantity = order_quantity
         self.min_volume = min_volume
+        self.max_spread = max_spread
 
     def evaluate(
         self,
@@ -61,6 +63,7 @@ class MeanReversionStrategy(Strategy):
 
         recent = trades[: self.window]
         mean_price = sum(t.yes_price for t in recent) / len(recent)
+        no_mean = Decimal("1.00") - mean_price
 
         # Use ask prices for buy signals (what we'd actually pay)
         yes_ask = market.yes_ask
@@ -74,7 +77,7 @@ class MeanReversionStrategy(Strategy):
                 price=yes_ask,
                 quantity=self.order_quantity,
             )
-        elif no_ask > Decimal("0") and market.yes_bid > mean_price + self.threshold:
+        elif no_ask > Decimal("0") and no_ask < no_mean - self.threshold:
             return TradeSignal(
                 ticker=market.ticker,
                 side=Side.NO,
@@ -86,8 +89,15 @@ class MeanReversionStrategy(Strategy):
         return None
 
     def select_markets(self, markets: list[Market]) -> list[Market]:
-        return [
-            m
-            for m in markets
-            if m.status in ("open", "active") and m.volume >= self.min_volume
-        ]
+        selected = []
+        for m in markets:
+            if m.status not in ("open", "active"):
+                continue
+            if m.volume < self.min_volume:
+                continue
+            if self.max_spread is not None:
+                spread = m.yes_ask - m.yes_bid
+                if spread <= Decimal("0") or spread > self.max_spread:
+                    continue
+            selected.append(m)
+        return selected

@@ -225,6 +225,114 @@ class TestMeanReversionStrategy:
         assert len(selected) == 1
         assert selected[0].ticker == "B"
 
+    def test_select_markets_filters_wide_spread(self):
+        """Markets with spread > max_spread should be excluded."""
+        strategy = MeanReversionStrategy(
+            window=3, threshold=Decimal("0.05"), order_quantity=10,
+            max_spread=Decimal("0.03"),
+        )
+        tight = Market(
+            ticker="A", title="A", status="open", result="",
+            yes_bid=Decimal("0.50"), yes_ask=Decimal("0.52"),
+            no_bid=Decimal("0.48"), no_ask=Decimal("0.50"),
+            volume=100, open_interest=10,
+            event_ticker="E", series_ticker="S", subtitle="", close_time="",
+        )
+        wide = Market(
+            ticker="B", title="B", status="open", result="",
+            yes_bid=Decimal("0.40"), yes_ask=Decimal("0.50"),
+            no_bid=Decimal("0.50"), no_ask=Decimal("0.60"),
+            volume=100, open_interest=10,
+            event_ticker="E", series_ticker="S", subtitle="", close_time="",
+        )
+        selected = strategy.select_markets([tight, wide])
+        assert len(selected) == 1
+        assert selected[0].ticker == "A"
+
+    def test_select_markets_no_spread_filter_when_none(self):
+        """When max_spread is None, all spreads are accepted."""
+        strategy = MeanReversionStrategy(
+            window=3, threshold=Decimal("0.05"), order_quantity=10,
+            max_spread=None,
+        )
+        wide = Market(
+            ticker="A", title="A", status="open", result="",
+            yes_bid=Decimal("0.10"), yes_ask=Decimal("0.90"),
+            no_bid=Decimal("0.10"), no_ask=Decimal("0.90"),
+            volume=100, open_interest=10,
+            event_ticker="E", series_ticker="S", subtitle="", close_time="",
+        )
+        selected = strategy.select_markets([wide])
+        assert len(selected) == 1
+
+    def test_select_markets_rejects_zero_or_negative_spread(self):
+        """Markets with spread <= 0 should be excluded when max_spread is set."""
+        strategy = MeanReversionStrategy(
+            window=3, threshold=Decimal("0.05"), order_quantity=10,
+            max_spread=Decimal("0.05"),
+        )
+        bad_spread = Market(
+            ticker="A", title="A", status="open", result="",
+            yes_bid=Decimal("0.50"), yes_ask=Decimal("0.50"),
+            no_bid=Decimal("0.50"), no_ask=Decimal("0.50"),
+            volume=100, open_interest=10,
+            event_ticker="E", series_ticker="S", subtitle="", close_time="",
+        )
+        selected = strategy.select_markets([bad_spread])
+        assert len(selected) == 0
+
+    def test_buy_no_uses_no_ask_consistently(self, portfolio, sample_orderbook):
+        """NO signal should check no_ask < no_mean - threshold (consistent with YES signal)."""
+        strategy = MeanReversionStrategy(
+            window=3,
+            threshold=Decimal("0.05"),
+            order_quantity=10,
+        )
+        # Set up market where YES is overpriced:
+        # yes_bid=0.85, no_ask=0.15
+        # Mean yes_price=0.70, so no_mean=0.30
+        # no_ask (0.15) < no_mean (0.30) - threshold (0.05) = 0.25 -> YES -> BUY NO
+        market = Market(
+            ticker="T", title="Test", status="open", result="",
+            yes_bid=Decimal("0.85"), yes_ask=Decimal("0.87"),
+            no_bid=Decimal("0.13"), no_ask=Decimal("0.15"),
+            volume=1000, open_interest=100,
+            event_ticker="E", series_ticker="S", subtitle="", close_time="",
+        )
+        trades = [
+            _make_trade("T", yes_price=Decimal("0.70")),
+            _make_trade("T", yes_price=Decimal("0.72")),
+            _make_trade("T", yes_price=Decimal("0.68")),
+        ]
+        signal = strategy.evaluate(market, sample_orderbook, trades, portfolio)
+        assert signal is not None
+        assert signal.side == Side.NO
+        assert signal.price == Decimal("0.15")
+
+    def test_no_signal_when_no_ask_not_cheap_enough(self, portfolio, sample_orderbook):
+        """NO signal should NOT fire when no_ask is not below no_mean - threshold."""
+        strategy = MeanReversionStrategy(
+            window=3,
+            threshold=Decimal("0.05"),
+            order_quantity=10,
+        )
+        # Mean yes=0.70, no_mean=0.30
+        # no_ask=0.28, threshold=0.05, 0.28 > 0.30-0.05=0.25 -> NO signal
+        market = Market(
+            ticker="T", title="Test", status="open", result="",
+            yes_bid=Decimal("0.72"), yes_ask=Decimal("0.74"),
+            no_bid=Decimal("0.26"), no_ask=Decimal("0.28"),
+            volume=1000, open_interest=100,
+            event_ticker="E", series_ticker="S", subtitle="", close_time="",
+        )
+        trades = [
+            _make_trade("T", yes_price=Decimal("0.70")),
+            _make_trade("T", yes_price=Decimal("0.72")),
+            _make_trade("T", yes_price=Decimal("0.68")),
+        ]
+        signal = strategy.evaluate(market, sample_orderbook, trades, portfolio)
+        assert signal is None
+
 
 def _make_trade(ticker: str, yes_price: Decimal) -> PublicTrade:
     return PublicTrade(
